@@ -1534,6 +1534,8 @@ html.bloccato .toast { top: calc(16px + env(safe-area-inset-top, 0px)); bottom: 
   // Cifre lette male dal telefono: I, L, | e ! per 1, Z per 2, O per 0.
   function cifra(tok) {
     if (!tok || tok.length > 2) return null;
+    // con due caratteri solo cifre vere: "IL" letto davanti a PATATE FRITTE non è 11
+    if (tok.length === 2 && !/^\d{2}$/.test(tok)) return null;
     var s = tok.replace(/[IL|!]/g, "1").replace(/Z/g, "2").replace(/O/g, "0");
     return /^\d{1,2}$/.test(s) ? Number(s) : null;
   }
@@ -1631,8 +1633,8 @@ html.bloccato .toast { top: calc(16px + env(safe-area-inset-top, 0px)); bottom: 
     var linee = t.split(/\r?\n/).map(function (x) { return x.trim(); });
     for (var i = 1; i < linee.length; i++) {
       if (!ORA_SOLA.test(semplice(linee[i]).trim())) continue;
-      // solo parole vere (almeno 2 lettere): il telefono aggiunge a volte lettere sparse ("Camilla a i")
-      var sopra = linee[i - 1].replace(/[^A-Za-zÀ-ÿ' ]/g, " ").split(/\s+/).filter(function (w) { return w.length >= 2; }).join(" ").trim();
+      // la prima parola vera (almeno 2 lettere): il telefono aggiunge a volte lettere sparse ("Camilla a i")
+      var sopra = (linee[i - 1].replace(/[^A-Za-zÀ-ÿ' ]/g, " ").split(/\s+/).filter(function (w) { return w.length >= 2; })[0] || "");
       if (/^[A-Za-zÀ-ÿ'][A-Za-zÀ-ÿ' ]{1,30}$/.test(sopra) && !/^(asporto|tavolo|cucina|pizzeria|domicilio|consegna)$/i.test(sopra)) return sopra;
       break;
     }
@@ -1711,11 +1713,8 @@ html.bloccato .toast { top: calc(16px + env(safe-area-inset-top, 0px)); bottom: 
     return { q: q, righe: righe, ora: ora, rif: rif, nome: nome };
   }
 
-  // Testo della foto ricostruito dalle parole lette dal telefono con posizione e sicurezza (formato TSV di Tesseract).
-  // Serve a togliere i numeri finti: il bordo della carta o un'ombra letti come "1" attaccato alla quantità
-  // ("3" diventa "13"). Le quantità vere stanno tutte nella stessa colonna e hanno la stessa larghezza per cifra:
-  // una quantità poco sicura, più larga del normale, che finisce dove finisce la colonna, tiene solo l'ultima cifra;
-  // una che non finisce nella colonna resta com'è ma con un segno, così la riga va controllata a mano.
+  // Testo della foto ricostruito dalle parole lette dal telefono con la loro sicurezza (formato TSV di Tesseract).
+  // Serve a non contare i numeri finti: il bordo della carta o un'ombra letti come una cifra attaccata alla quantità.
   function testoDaTsv(tsv) {
     var righe = {}, ordine = [];
     String(tsv || "").split("\n").forEach(function (l) {
@@ -1727,27 +1726,13 @@ html.bloccato .toast { top: calc(16px + env(safe-area-inset-top, 0px)); bottom: 
       if (!righe[k]) { righe[k] = []; ordine.push(k); }
       righe[k].push({ x: Number(c[6]), w: Number(c[8]), conf: Number(c[10]), t: testo });
     });
-    // colonna delle quantità: prime parole fatte di una sola cifra, lette con sicurezza, seguite da altro testo
-    var buone = [];
-    ordine.forEach(function (k) {
-      var p = righe[k];
-      if (p.length >= 2 && /^\d$/.test(p[0].t) && p[0].conf >= 50) buone.push(p[0]);
-    });
-    var col = null;
-    if (buone.length >= 1) {
-      var dx = buone.map(function (p) { return p.x + p.w; }).sort(function (a, b) { return a - b; });
-      var lw = buone.map(function (p) { return p.w; }).sort(function (a, b) { return a - b; });
-      col = { destra: dx[dx.length >> 1], cifra: lw[lw.length >> 1] };
-    }
     return ordine.map(function (k) {
       var p = righe[k];
       var primo = p[0];
-      // quantità di due cifre attaccata al bordo dell'immagine: la prima cifra è il bordo della carta
-      if (p.length >= 2 && /^\d{2}$/.test(primo.t) && primo.conf < 60 && primo.x <= 4) primo = { t: primo.t.slice(-1) };
-      else if (col && p.length >= 2 && /^\d{2}$/.test(primo.t) && primo.conf < 60 && primo.w > col.cifra * 1.5) {
-        if (Math.abs(primo.x + primo.w - col.destra) <= col.cifra * 0.8) primo = { t: primo.t.slice(-1) };
-        else primo = { t: "?" + primo.t };
-      }
+      // quantità di due cifre letta con poca sicurezza: di solito è il bordo della carta o un'ombra letti come
+      // una cifra in più ("1" diventa "21", "3" diventa "13"). Non si indovina: la riga resta da controllare
+      // (se l'altra lettura della foto ha letto la cifra giusta, si prende quella).
+      if (p.length >= 2 && /^[^A-Za-z0-9]*\d{2,}[^A-Za-z0-9]*$/.test(primo.t) && primo.conf < 80) primo = { t: "?" };
       return [primo.t].concat(p.slice(1).map(function (w) { return w.t; })).join(" ");
     }).join("\n");
   }
@@ -1758,29 +1743,35 @@ html.bloccato .toast { top: calc(16px + env(safe-area-inset-top, 0px)); bottom: 
   function unisciLetture(a, b) {
     if (!a) return b;
     if (!b) return a;
-    function conta(l) {
-      var m = {};
-      l.righe.forEach(function (r) { if (r.stato === "contata") { var k = r.quantita + "|" + r.prodotto + "|" + r.categoria; m[k] = (m[k] || 0) + 1; } });
-      return m;
-    }
-    var ca = conta(a), cb = conta(b);
-    var nA = Object.keys(ca).reduce(function (t, k) { return t + ca[k]; }, 0), nB = Object.keys(cb).reduce(function (t, k) { return t + cb[k]; }, 0);
-    var base = nB > nA ? b : a, altra = base === a ? b : a, cBase = base === a ? ca : cb, cAltra = base === a ? cb : ca;
+    function contate(l) { return l.righe.filter(function (r) { return r.stato === "contata"; }); }
+    var base = contate(b).length > contate(a).length ? b : a, altra = base === a ? b : a;
     var q = zero(), righe = base.righe.slice();
     CONTATE.forEach(function (c) { q[c] = base.q[c]; });
-    // righe contate solo nell'altra lettura: si aggiungono
-    var aggiunte = {};
-    altra.righe.forEach(function (r) {
-      if (r.stato !== "contata") return;
-      var k = r.quantita + "|" + r.prodotto + "|" + r.categoria;
-      aggiunte[k] = (aggiunte[k] || 0) + 1;
-      if (aggiunte[k] > (cBase[k] || 0)) {
-        q[r.categoria] += r.quantita;
-        righe.push(r);
-        // la stessa riga, se nella lettura principale era rimasta "da controllare", ora non serve più
-        for (var i = 0; i < righe.length; i++) {
-          if (righe[i].stato === "da controllare" && righe[i].prodotto === r.prodotto) { righe.splice(i, 1); break; }
-        }
+    // per ogni prodotto: se l'altra lettura ha trovato più righe, le righe in più si aggiungono
+    // (quelle con quantità che la lettura principale non ha); se ne ha lo stesso numero ma con quantità
+    // diverse, le due letture non sono d'accordo: si tiene la principale e si chiede di controllare
+    var prodotti = {};
+    contate(base).forEach(function (r) { (prodotti[r.prodotto] = prodotti[r.prodotto] || { base: [], altra: [] }).base.push(r); });
+    contate(altra).forEach(function (r) { (prodotti[r.prodotto] = prodotti[r.prodotto] || { base: [], altra: [] }).altra.push(r); });
+    Object.keys(prodotti).forEach(function (nome) {
+      var p = prodotti[nome];
+      var resto = p.base.map(function (r) { return r.quantita; });
+      var diverse = p.altra.filter(function (r) {
+        var i = resto.indexOf(r.quantita);
+        if (i >= 0) { resto.splice(i, 1); return false; }
+        return true;
+      });
+      if (!diverse.length) return;
+      if (p.altra.length > p.base.length) {
+        diverse.slice(0, p.altra.length - p.base.length).forEach(function (r) {
+          q[r.categoria] += r.quantita;
+          righe.push(r);
+          for (var i = 0; i < righe.length; i++) {
+            if (righe[i].stato === "da controllare" && righe[i].prodotto === r.prodotto) { righe.splice(i, 1); break; }
+          }
+        });
+      } else if (p.altra.length === p.base.length) {
+        righe.push({ testo: nome, stato: "da controllare", prodotto: nome, nota: "quantità letta in due modi (" + diverse.map(function (r) { return r.quantita; }).join(", ") + "): controlla" });
       }
     });
     return { q: q, righe: righe, ora: base.ora || altra.ora || null, rif: base.rif || altra.rif || null, nome: base.nome || altra.nome || null, reparto: base.reparto || altra.reparto || null };
@@ -2027,6 +2018,34 @@ html.bloccato .toast { top: calc(16px + env(safe-area-inset-top, 0px)); bottom: 
     return b;
   }
 
+  // Toglie i puntini sparsi (grana della carta, venature rimaste): macchie nere troppo piccole per essere
+  // un pezzo di lettera. "minimo": pixel sotto cui una macchia si cancella (proporzionato all'altezza delle righe).
+  function togliPuntini(b, w, h, minimo) {
+    // anche i segni sottili e verticali sui lati (ombra e bordo della carta): nessuna lettera è così stretta
+    var magro = Math.max(3, Math.round(w * 0.008)), lato = w * 0.12;
+    var visto = new Uint8Array(w * h), pila = new Int32Array(w * h), pezzo = new Int32Array(w * h);
+    for (var s0 = 0; s0 < w * h; s0++) {
+      if (b[s0] !== 0 || visto[s0]) continue;
+      var cima = 0, n = 0, x1 = w, x2 = 0, y1 = h, y2 = 0;
+      pila[cima++] = s0; visto[s0] = 1;
+      while (cima) {
+        var c = pila[--cima], cx = c % w, cy = (c - cx) / w;
+        pezzo[n++] = c;
+        if (cx < x1) x1 = cx; if (cx > x2) x2 = cx; if (cy < y1) y1 = cy; if (cy > y2) y2 = cy;
+        if (cx > 0 && b[c - 1] === 0 && !visto[c - 1]) { visto[c - 1] = 1; pila[cima++] = c - 1; }
+        if (cx < w - 1 && b[c + 1] === 0 && !visto[c + 1]) { visto[c + 1] = 1; pila[cima++] = c + 1; }
+        if (c >= w && b[c - w] === 0 && !visto[c - w]) { visto[c - w] = 1; pila[cima++] = c - w; }
+        if (c < w * (h - 1) && b[c + w] === 0 && !visto[c + w]) { visto[c + w] = 1; pila[cima++] = c + w; }
+      }
+      var largo = x2 - x1 + 1, alto = y2 - y1 + 1, centro = (x1 + x2) / 2;
+      var diLato = centro < lato || centro > w - lato;
+      // sui lati: segni sottili e verticali, o macchiette (fino a 3 volte il minimo): una cifra è più grande
+      var segnoDiLato = diLato && ((largo <= magro && alto >= largo * 2) || n < minimo * 3);
+      if (n < minimo || segnoDiLato) for (var i = 0; i < n; i++) b[pezzo[i]] = 255;
+    }
+    return b;
+  }
+
   // Raddrizza una comanda fotografata un po' storta (fino a 6 gradi): prova le inclinazioni e tiene
   // quella in cui le righe di stampa sono più nette (conteggio dell'inchiostro riga per riga).
   function raddrizza(b, w, h) {
@@ -2034,9 +2053,10 @@ html.bloccato .toast { top: calc(16px + env(safe-area-inset-top, 0px)); bottom: 
     for (var y = 0; y < h; y += 2) for (var x = 0; x < w; x += 2) if (b[y * w + x] === 0) punti.push(x, y);
     if (punti.length < 200) return b;
     function punteggio(a) {
-      var t = Math.tan(a), cx = w / 2, righe = new Float64Array(h + w + 2), off = Math.ceil(w / 2) + 1;
+      var t = Math.tan(a), cx = w / 2, righe = new Float64Array(h + w + 2), off = Math.ceil(w / 4) + 1;
       for (var i = 0; i < punti.length; i += 2) {
-        var yy = Math.round(punti[i + 1] - (punti[i] - cx) * t) + off;
+        // righe a passo 2 come i punti presi: senza, l'angolo zero vince sempre (metà delle righe vuote)
+        var yy = Math.round((punti[i + 1] - (punti[i] - cx) * t) / 2) + off;
         if (yy >= 0 && yy < righe.length) righe[yy]++;
       }
       var s2 = 0;
@@ -2078,13 +2098,13 @@ html.bloccato .toast { top: calc(16px + env(safe-area-inset-top, 0px)); bottom: 
       if (k > 1) m2 = { w: Math.round(zona.w * k), h: Math.round(zona.h * k) };
       return Promise.resolve(render(zona.x, zona.y, zona.w, zona.h, m2.w, m2.h)).then(function (px2) {
         var dati = prepara(px2, m2.w, m2.h);
-        if (r && !(opz && opz.soloGrigio)) dati = raddrizza(pulisciBordi(dati, m2.w, m2.h), m2.w, m2.h);
+        if (r && !(opz && opz.soloGrigio)) dati = raddrizza(togliPuntini(pulisciBordi(dati, m2.w, m2.h), m2.w, m2.h, Math.max(12, Math.round(Math.max(m2.w, m2.h) * 0.015))), m2.w, m2.h);
         return { dati: dati, w: m2.w, h: m2.h, ritagliata: !!r };
       });
     });
   }
 
-  var P = { grigio: grigio, soglia: soglia, misuraLettura: misuraLettura, prepara: prepara, pgm: pgm, riquadroTesto: riquadroTesto, riquadroFoglio: riquadroFoglio, pulisciBordi: pulisciBordi, raddrizza: raddrizza, preparaFoto: preparaFoto };
+  var P = { grigio: grigio, soglia: soglia, misuraLettura: misuraLettura, prepara: prepara, pgm: pgm, riquadroTesto: riquadroTesto, riquadroFoglio: riquadroFoglio, pulisciBordi: pulisciBordi, raddrizza: raddrizza, togliPuntini: togliPuntini, preparaFoto: preparaFoto };
   if (typeof module !== "undefined" && module.exports) module.exports = P;
   else root.LavagnaPreparazione = P;
 })(typeof self !== "undefined" ? self : this);
