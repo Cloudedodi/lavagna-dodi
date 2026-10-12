@@ -1479,6 +1479,8 @@ html.bloccato .toast { top: calc(16px + env(safe-area-inset-top, 0px)); bottom: 
     var grezza = String(originale == null ? "" : originale).replace(/€/g, " EUR ").replace(PREZZO, "");
     var t = normalizza(grezza).replace(PREZZO, "").trim();
     if (!t || !/[A-Z0-9]/.test(t)) return null; // righe vuote o di soli trattini
+    // riga che comincia con un orario ("19:00", "19:00 Tea" con sporcizia dopo): è l'orario di ritiro, non un prodotto
+    if (/^[^A-Za-z0-9]*\d{1,2}\s*[:.]\s*\d{2}(?![\d.\/-])/.test(String(originale == null ? "" : originale))) return { testo: originale, tipo: "altro" };
     // un segno attaccato al numero ("-2 DODI BURGER", "'6 PATATE FRITTE") è sporcizia letta dal telefono, non un'aggiunta
     if (/^[-*>'.,:;=_][-*>'.,:;=_ ]*\d{1,2}\.? [A-Z]/.test(t)) t = t.replace(/^[-*>'.,:;=_ ]+/, "");
     if (MODIFICA.test(t)) return { testo: originale, tipo: "aggiunta" };
@@ -1604,7 +1606,8 @@ html.bloccato .toast { top: calc(16px + env(safe-area-inset-top, 0px)); bottom: 
     for (i = 0; i < linee.length; i++) if ((o = oraValida(ORA_SOLA.exec(linee[i].trim())))) return o;
     return null;
   }
-  var ORA_SOLA = /^[^A-Z0-9]*(\d{1,2})\s*[:.]\s*(\d{2})[^A-Z0-9]*$/;
+  // orario da solo sulla riga; dopo può esserci un po' di sporcizia letta dal telefono ("19:00 TEA")
+  var ORA_SOLA = /^[^A-Z0-9]*(\d{1,2})\s*[:.]\s*(\d{2})(?:[^A-Z0-9]*|\s+[A-Z]{1,3}[^A-Z0-9]*)$/;
 
   // Numero dell'ordine: prima "ORDINE"/"BON", poi "NR"/"NUMERO"/"#". Senza zeri davanti.
   function cercaRiferimento(testo) {
