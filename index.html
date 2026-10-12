@@ -623,6 +623,16 @@ html.bloccato .toast { top: calc(16px + env(safe-area-inset-top, 0px)); bottom: 
 .riga-account { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; margin-top: 10px; font-size: 0.85rem; color: var(--matita); }
 .spunta { display: flex; gap: 8px; align-items: center; font-size: 0.9rem; }
 
+/* ---------- totale della giornata, in fondo alla lavagna ---------- */
+.totale-giorno { margin: 22px 0 6px; padding: 14px 16px; border: 2px solid var(--inchiostro); border-radius: 14px; background: var(--foglio); }
+.totale-giorno h2 { margin: 0; font-family: var(--font-titolo); font-weight: 900; font-stretch: 85%; text-transform: uppercase; font-size: 1.15rem; }
+.totale-giorno-ordini { margin: 2px 0 10px; color: var(--matita); font-size: 0.88rem; }
+.totale-giorno-voci { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(92px, 1fr)); gap: 8px; }
+.totale-giorno-voci:empty { display: none; }
+.totale-giorno-voci li { display: grid; justify-items: center; gap: 2px; padding: 8px 4px; border-radius: 10px; background: var(--carta); }
+.tg-num { font-family: var(--font-titolo); font-weight: 900; font-size: 1.9rem; line-height: 1; font-variant-numeric: tabular-nums; }
+.tg-nome { font-size: 0.82rem; color: var(--matita); }
+
 </style>
 </head>
 <body>
@@ -656,6 +666,12 @@ html.bloccato .toast { top: calc(16px + env(safe-area-inset-top, 0px)); bottom: 
   <div class="avvisi" id="avvisi" aria-live="polite"></div>
 
   <main class="lavagna" id="lavagna" aria-label="Ordini per fascia oraria"></main>
+
+  <section class="totale-giorno" id="totale-giorno" aria-labelledby="totale-giorno-titolo" hidden>
+    <h2 id="totale-giorno-titolo">Totale della giornata</h2>
+    <p class="totale-giorno-ordini" id="totale-giorno-ordini"></p>
+    <ul class="totale-giorno-voci" id="totale-giorno-voci"></ul>
+  </section>
 
   <footer class="piede">
     <div class="legenda" aria-label="Legenda dei colori">
@@ -2893,6 +2909,29 @@ window.LAVAGNA_CONFIG = {"url":"https://mwebwmxmtxsgeoktmhkc.supabase.co","chiav
     testo += parti.length ? "Limiti per fascia: " + parti.join(", ") + ". " : "Nessun limite impostato. ";
     if (S.imp.visibili.mezzometro !== false) testo += "Un mezzo metro vale " + plurale(S.imp.pesoMezzoMetro, "pizza", "pizze") + " nel forno.";
     $("piede-regole").textContent = testo;
+    renderTotaleGiorno();
+  }
+
+  // In fondo alla lavagna: pranzo + cena (e altri orari) del giorno mostrato, per categoria.
+  function renderTotaleGiorno() {
+    var riep = riepilogoCorrente();
+    var q = L.zeroQuantita(), ordini = 0;
+    riep.sezioni.forEach(function (sez) {
+      ordini += sez.totale.ordini;
+      Object.keys(q).forEach(function (k) { q[k] += sez.totale.q[k] || 0; });
+    });
+    var box = $("totale-giorno");
+    box.hidden = !S.ordiniCaricati;
+    $("totale-giorno-titolo").textContent = S.giorno === oggi() ? "Totale di oggi" : "Totale del " + L.etichettaGiorno(S.giorno);
+    $("totale-giorno-ordini").textContent = ordini ? plurale(ordini, "ordine", "ordini") + " segnati sulla lavagna" : "Nessun ordine segnato";
+    var lista = $("totale-giorno-voci");
+    svuota(lista);
+    if (!ordini) return;
+    L.CATEGORIE.forEach(function (c) {
+      var n = q[c.chiave] || 0;
+      if (!n && S.imp.visibili[c.chiave] === false) return;
+      lista.appendChild(el("li", null, [el("span", { class: "tg-num", text: String(n) }), el("span", { class: "tg-nome", text: n === 1 ? c.singolare : c.plurale })]));
+    });
   }
 
   // ---------- focus: dove tornare quando si chiude un foglio ----------
