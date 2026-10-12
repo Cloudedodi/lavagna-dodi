@@ -1457,7 +1457,8 @@ html.bloccato .toast { top: calc(16px + env(safe-area-inset-top, 0px)); bottom: 
       else {
         s = somiglianza(t, v.chiave);
         // nomi lunghi stampati tagliati: "ALETTE DI POLLO ALLA PAP"
-        if (t.length >= 8 && t.length < v.chiave.length) s = Math.max(s, somiglianza(t, v.chiave.slice(0, t.length)) - 0.04);
+        // (solo nomi lunghi: la stampante taglia oltre i 20 caratteri; "BURGER E" non è "BURGERREDOLO")
+        if (t.length >= 12 && v.chiave.length > 20 && t.length < v.chiave.length) s = Math.max(s, somiglianza(t, v.chiave.slice(0, t.length)) - 0.04);
       }
       if (!migliore || s > migliore.s) { secondo = migliore ? migliore.s : 0; migliore = { voce: v, s: s }; }
       else if (s > secondo) secondo = s;
@@ -1627,7 +1628,8 @@ html.bloccato .toast { top: calc(16px + env(safe-area-inset-top, 0px)); bottom: 
     var linee = t.split(/\r?\n/).map(function (x) { return x.trim(); });
     for (var i = 1; i < linee.length; i++) {
       if (!ORA_SOLA.test(semplice(linee[i]).trim())) continue;
-      var sopra = linee[i - 1].replace(/[^A-Za-zÀ-ÿ' ]/g, "").trim();
+      // solo parole vere (almeno 2 lettere): il telefono aggiunge a volte lettere sparse ("Camilla a i")
+      var sopra = linee[i - 1].replace(/[^A-Za-zÀ-ÿ' ]/g, " ").split(/\s+/).filter(function (w) { return w.length >= 2; }).join(" ").trim();
       if (/^[A-Za-zÀ-ÿ'][A-Za-zÀ-ÿ' ]{1,30}$/.test(sopra) && !/^(asporto|tavolo|cucina|pizzeria|domicilio|consegna)$/i.test(sopra)) return sopra;
       break;
     }
@@ -1706,6 +1708,81 @@ html.bloccato .toast { top: calc(16px + env(safe-area-inset-top, 0px)); bottom: 
     return { q: q, righe: righe, ora: ora, rif: rif, nome: nome };
   }
 
+  // Testo della foto ricostruito dalle parole lette dal telefono con posizione e sicurezza (formato TSV di Tesseract).
+  // Serve a togliere i numeri finti: il bordo della carta o un'ombra letti come "1" attaccato alla quantità
+  // ("3" diventa "13"). Le quantità vere stanno tutte nella stessa colonna e hanno la stessa larghezza per cifra:
+  // una quantità poco sicura, più larga del normale, che finisce dove finisce la colonna, tiene solo l'ultima cifra;
+  // una che non finisce nella colonna resta com'è ma con un segno, così la riga va controllata a mano.
+  function testoDaTsv(tsv) {
+    var righe = {}, ordine = [];
+    String(tsv || "").split("\n").forEach(function (l) {
+      var c = l.split("\t");
+      if (c[0] !== "5" || c.length < 12) return;
+      var testo = c.slice(11).join(" ").trim();
+      if (!testo) return;
+      var k = c[1] + "." + c[2] + "." + c[3] + "." + c[4];
+      if (!righe[k]) { righe[k] = []; ordine.push(k); }
+      righe[k].push({ x: Number(c[6]), w: Number(c[8]), conf: Number(c[10]), t: testo });
+    });
+    // colonna delle quantità: prime parole fatte di una sola cifra, lette con sicurezza, seguite da altro testo
+    var buone = [];
+    ordine.forEach(function (k) {
+      var p = righe[k];
+      if (p.length >= 2 && /^\d$/.test(p[0].t) && p[0].conf >= 50) buone.push(p[0]);
+    });
+    var col = null;
+    if (buone.length >= 1) {
+      var dx = buone.map(function (p) { return p.x + p.w; }).sort(function (a, b) { return a - b; });
+      var lw = buone.map(function (p) { return p.w; }).sort(function (a, b) { return a - b; });
+      col = { destra: dx[dx.length >> 1], cifra: lw[lw.length >> 1] };
+    }
+    return ordine.map(function (k) {
+      var p = righe[k];
+      var primo = p[0];
+      // quantità di due cifre attaccata al bordo dell'immagine: la prima cifra è il bordo della carta
+      if (p.length >= 2 && /^\d{2}$/.test(primo.t) && primo.conf < 60 && primo.x <= 4) primo = { t: primo.t.slice(-1) };
+      else if (col && p.length >= 2 && /^\d{2}$/.test(primo.t) && primo.conf < 60 && primo.w > col.cifra * 1.5) {
+        if (Math.abs(primo.x + primo.w - col.destra) <= col.cifra * 0.8) primo = { t: primo.t.slice(-1) };
+        else primo = { t: "?" + primo.t };
+      }
+      return [primo.t].concat(p.slice(1).map(function (w) { return w.t; })).join(" ");
+    }).join("\n");
+  }
+
+  // Due letture della STESSA foto (fatte a misure diverse): il telefono a volte salta una riga in una
+  // e non nell'altra. Per ogni riga contata (quantità + prodotto) si tiene il numero di volte più alto
+  // tra le due letture; le righe da controllare vengono dalla lettura con più righe contate.
+  function unisciLetture(a, b) {
+    if (!a) return b;
+    if (!b) return a;
+    function conta(l) {
+      var m = {};
+      l.righe.forEach(function (r) { if (r.stato === "contata") { var k = r.quantita + "|" + r.prodotto + "|" + r.categoria; m[k] = (m[k] || 0) + 1; } });
+      return m;
+    }
+    var ca = conta(a), cb = conta(b);
+    var nA = Object.keys(ca).reduce(function (t, k) { return t + ca[k]; }, 0), nB = Object.keys(cb).reduce(function (t, k) { return t + cb[k]; }, 0);
+    var base = nB > nA ? b : a, altra = base === a ? b : a, cBase = base === a ? ca : cb, cAltra = base === a ? cb : ca;
+    var q = zero(), righe = base.righe.slice();
+    CONTATE.forEach(function (c) { q[c] = base.q[c]; });
+    // righe contate solo nell'altra lettura: si aggiungono
+    var aggiunte = {};
+    altra.righe.forEach(function (r) {
+      if (r.stato !== "contata") return;
+      var k = r.quantita + "|" + r.prodotto + "|" + r.categoria;
+      aggiunte[k] = (aggiunte[k] || 0) + 1;
+      if (aggiunte[k] > (cBase[k] || 0)) {
+        q[r.categoria] += r.quantita;
+        righe.push(r);
+        // la stessa riga, se nella lettura principale era rimasta "da controllare", ora non serve più
+        for (var i = 0; i < righe.length; i++) {
+          if (righe[i].stato === "da controllare" && righe[i].prodotto === r.prodotto) { righe.splice(i, 1); break; }
+        }
+      }
+    });
+    return { q: q, righe: righe, ora: base.ora || altra.ora || null, rif: base.rif || altra.rif || null, nome: base.nome || altra.nome || null, reparto: base.reparto || altra.reparto || null };
+  }
+
   // Elenco dei prodotti da mettere nella domanda a Claude.
   function catalogoPerClaude() {
     return CONTATE.concat(["panini", "insalate", "menu", "bevande", "aggiunta"]).map(function (c) {
@@ -1754,7 +1831,7 @@ html.bloccato .toast { top: calc(16px + env(safe-area-inset-top, 0px)); bottom: 
   var C = {
     CATALOGO: CATALOGO, CONTATE: CONTATE, NOMI_CATEGORIA: NOMI_CATEGORIA,
     normalizza: normalizza, somiglianza: somiglianza, trovaProdotto: trovaProdotto, analizzaRiga: analizzaRiga,
-    leggiComanda: leggiComanda, unisci: unisci, cercaOra: cercaOra, cercaRiferimento: cercaRiferimento, cercaNome: cercaNome,
+    leggiComanda: leggiComanda, unisci: unisci, unisciLetture: unisciLetture, testoDaTsv: testoDaTsv, cercaOra: cercaOra, cercaRiferimento: cercaRiferimento, cercaNome: cercaNome,
     catalogoPerClaude: catalogoPerClaude, daRispostaClaude: daRispostaClaude, stessoNumero: stessoNumero, reparto: reparto
   };
   if (typeof module !== "undefined" && module.exports) module.exports = C;
@@ -3212,17 +3289,27 @@ window.LAVAGNA_CONFIG = {"url":"https://mwebwmxmtxsgeoktmhkc.supabase.co","chiav
         ctx.drawImage(im.img, x, y, w, h, 0, 0, dw, dh);
         return ctx.getImageData(0, 0, dw, dh).data;
       }
-      return Promise.resolve().then(function () {
-        return P.preparaFoto(im.img.naturalWidth, im.img.naturalHeight, render, { lato: 1200 });
-      }).then(function (p) {
+      // due letture a misure diverse: il telefono a volte salta una riga in una e non nell'altra
+      function passata(lato) {
+        return Promise.resolve().then(function () {
+          return P.preparaFoto(im.img.naturalWidth, im.img.naturalHeight, render, { lato: lato });
+        }).then(function (p) { return Lettore.leggi(p.dati, p.w, p.h); }).then(function (m) {
+          var l = C.leggiComanda(m.tsv ? C.testoDaTsv(m.tsv) : (m.testo || ""));
+          l.ms = m.ms || 0;
+          return l;
+        });
+      }
+      var prima;
+      return passata(1200).then(function (l1) {
+        prima = l1;
+        return passata(1000).catch(function () { return null; });
+      }).then(function (l2) {
         URL.revokeObjectURL(im.url);
-        return Lettore.leggi(p.dati, p.w, p.h);
+        var l = C.unisciLetture(prima, l2);
+        l.metodo = "telefono";
+        l.ms = prima.ms + (l2 ? l2.ms : 0);
+        return l;
       }, function (e) { URL.revokeObjectURL(im.url); throw e; });
-    }).then(function (m) {
-      var l = C.leggiComanda(m.testo || "");
-      l.metodo = "telefono";
-      l.ms = m.ms;
-      return l;
     });
   }
 

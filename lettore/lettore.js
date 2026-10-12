@@ -58,7 +58,10 @@ self.onmessage = function (ev) {
       Tess.FS.writeFile("/input", pgm(m.dati, m.w, m.h));
       api.SetImageFile();
       var testo = api.GetUTF8Text();
-      self.postMessage({ id: m.id, ok: true, testo: testo, ms: Date.now() - t0, simd: info.simd });
+      // anche le parole con posizione e sicurezza: servono a togliere i numeri finti (bordo della carta letto come "1")
+      var tsv = "";
+      try { tsv = api.GetTSVText(0); } catch (e) { tsv = ""; }
+      self.postMessage({ id: m.id, ok: true, testo: testo, tsv: tsv, ms: Date.now() - t0, simd: info.simd });
     } catch (e) {
       self.postMessage({ id: m.id, ok: false, errore: String((e && e.message) || e) });
     }
