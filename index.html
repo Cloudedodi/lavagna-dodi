@@ -425,6 +425,8 @@ html, button, input, select, .riga { touch-action: manipulation; }
 .r-contata .r-segno { color: var(--ok); }
 .r-da-controllare .r-segno, .r-da-controllare .r-nota { color: var(--pieno); font-weight: 700; }
 .r-non-contata .r-testo { color: var(--matita); }
+/* spiegazioni lunghe sotto la riga: il testo letto resta largo e leggibile */
+.r-da-controllare .r-nota, .r-non-contata .r-nota { grid-column: 2 / -1; text-align: left; font-size: 0.78rem; margin-top: -2px; }
 .foto-azioni { display: flex; flex-wrap: wrap; gap: 4px 16px; }
 .foto-azioni .btn-testo { cursor: pointer; }
 .foto-azioni [aria-disabled="true"] { opacity: 0.4; pointer-events: none; }
@@ -1474,14 +1476,44 @@ html.bloccato .toast { top: calc(16px + env(safe-area-inset-top, 0px)); bottom: 
   var PREZZO = /\s+(?:(?:EUR|€)?\s*\d{1,3}[.,][\dO]{1,2}|(?:EUR|€)\s*\d{1,3}|\d{1,3}\s*(?:EUR|€))\s*(?:EUR|€)?$/;
 
   // Una riga stampata: quantità + prodotto, aggiunta, oppure altro testo.
+  // Nota del cliente (in DISH è rientrata e scritta in minuscolo, spesso con il # davanti):
+  // "# bianca", "#cotto e funghi \", "salsiccia" sulla riga dopo. Non è mai un prodotto.
+  function eNota(grezza) {
+    var m = /^(?:[^A-Za-z0-9#]*|\S{1,2}\s+)#\s*(\S?)/.exec(grezza);
+    if (m && !/\d/.test(m[1])) return true; // "#1 Menu" è un 1 letto male, non una nota
+    var parole = grezza.match(/[A-Za-zÀ-ÿ]{3,}/g);
+    return !!(parole && parole.every(function (w) { return w === w.toLowerCase(); }));
+  }
+
+  // Una riga stampata: quantità + prodotto, aggiunta, nota, oppure altro testo.
+  // I segni sporchi del bordo della foto ("i, 1 DIAVOLA", "if 1 MEDITERRANEA") si provano a togliere
+  // dall'inizio: vale la lettura con quantità e prodotto riconosciuto.
   function analizzaRiga(originale) {
     var grezza = String(originale == null ? "" : originale).replace(/€/g, " EUR ").replace(PREZZO, "");
-    // nota di DISH: la riga inizia con il cancelletto ("# 4 stagioni no funghi")
-    if (/^\s*#/.test(grezza)) return { testo: originale, tipo: "nota" };
+    if (eNota(grezza)) return { testo: originale, tipo: "nota" };
     // "{ 1/2 METRO" o "| 1/2 METRO": l'1 davanti al mezzo letto come una parentesi o una barra
     grezza = grezza.replace(/^\s*[{}\[\]()|!]\s*(?=1\/2\s)/, "1 ");
     var t = normalizza(grezza).replace(PREZZO, "").trim();
     if (!t || !/[A-Z0-9]/.test(t)) return null; // righe vuote o di soli trattini
+    var parole = t.split(" ");
+    var primo = null, migliore = null, voto = -1;
+    for (var k = 0; k <= 3 && k < parole.length; k++) {
+      if (k > 0 && parole[k - 1].length > 2) break; // si tolgono solo segni corti
+      var resto = parole.slice(k).join(" ").replace(/^([1-9])(1\/2)\b/, "$1 $2");
+      var a = analizzaUna(originale, resto);
+      if (!a) continue;
+      if (k === 0) primo = a;
+      if (a.tipo !== "prodotto" || a.quantita === null) continue;
+      // meglio: prodotto esatto, quantità scritta con una cifra vera, meno segni tolti
+      var v = (a.esatto ? 4 : 0) + (/^\d/.test(resto) ? 2 : 0) - k * 0.5;
+      if (v > voto) { voto = v; migliore = a; }
+    }
+    if (migliore && (!primo || primo.tipo !== "prodotto" || primo.quantita === null || voto >= 4 || !primo.esatto)) return migliore;
+    return primo || { testo: originale, tipo: "altro" };
+  }
+
+  function analizzaUna(originale, t) {
+    if (!t) return null;
     if (MODIFICA.test(t)) {
       // segno sporco davanti a una riga vera ("- 1 1/2 METRO 3-4"): una modifica non ha la quantità davanti
       var dopo = /^[-*>]\s*(.*)$/.exec(t);
@@ -1489,14 +1521,11 @@ html.bloccato .toast { top: calc(16px + env(safe-area-inset-top, 0px)); bottom: 
       if (prova && prova.tipo === "prodotto" && prova.quantita !== null && prova.esatto) return prova;
       return { testo: originale, tipo: "aggiunta" };
     }
-    // quantità attaccata al mezzo: "11/2 MARGHERITA" è "1 1/2 MARGHERITA"
-    t = t.replace(/^([1-9])(1\/2)\b/, "$1 $2");
     var a = analizzaPulita(originale, t);
     if ((a.tipo === "prodotto" && a.esatto) || a.tipo === "sconosciuto") return a;
-    // segni sporchi letti ai bordi della foto ("| JESSICA", "1 1/2 METRO 3-4 N"): via le parole di 1-2 segni in fondo e in cima
+    // segni sporchi in fondo ("1 1/2 METRO 3-4 N"): via le parole di 1-2 segni
     var p = t.split(" "), tolto = false;
     while (p.length > 2 && p[p.length - 1].length <= 2 && !/^\d+[+]?$|^\d-\d$/.test(p[p.length - 1])) { p.pop(); tolto = true; }
-    while (p.length > 2 && p[0].length === 1 && !/[0-9ILZO]/.test(p[0])) { p.shift(); tolto = true; }
     if (tolto) {
       var b = analizzaPulita(originale, p.join(" "));
       if (b.tipo === "prodotto" && (a.tipo !== "prodotto" || b.esatto)) return b;
@@ -1624,8 +1653,10 @@ html.bloccato .toast { top: calc(16px + env(safe-area-inset-top, 0px)); bottom: 
     var linee = t.split(/\r?\n/).map(function (s) { return s.trim(); }).filter(Boolean);
     for (var i = 0; i < Math.min(linee.length - 1, 6); i++) {
       if (!/^\W{0,3}\s*(?:asporto|tavolo|banco|sala)\b/i.test(linee[i])) continue;
-      var nome = linee[i + 1].replace(/^[^A-Za-zÀ-ÿ]+|[^A-Za-zÀ-ÿ]+$/g, "").replace(/\s+[^\sA-Za-zÀ-ÿ]+$/, "");
-      if (/^[A-Za-zÀ-ÿ'][A-Za-zÀ-ÿ' ]{1,30}$/.test(nome) && !/^(?:ordine|serv|data|ora|pizzeria|cucina)\b/i.test(nome)) return nome.replace(/\s+/g, " ");
+      var riga = linee[i + 1];
+      if (/\d/.test(riga)) return null; // "1 Menu Completo": è già un prodotto, il nome non c'è
+      var nome = riga.replace(/^[^A-Za-zÀ-ÿ]+|[^A-Za-zÀ-ÿ]+$/g, "").replace(/\s+[^\sA-Za-zÀ-ÿ]+$/, "");
+      if (/^[A-Za-zÀ-ÿ'][A-Za-zÀ-ÿ' ]{1,30}$/.test(nome) && !/^(?:ordine|serv|data|ora|pizzeria|cucina|pizze|menu)\b/i.test(nome) && !trovaProdotto(nome)) return nome.replace(/\s+/g, " ");
       return null;
     }
     return null;
@@ -1682,6 +1713,12 @@ html.bloccato .toast { top: calc(16px + env(safe-area-inset-top, 0px)); bottom: 
         contabili = scelta;
       }
       var n = a.quantita;
+      // più di 9 dello stesso prodotto su una riga è raro: spesso è "1" più un segno letto come cifra
+      if (n > 9 && contabili.length) {
+        righe.push({ testo: riga, stato: "da controllare", prodotto: a.prodotto, quantita: n, nota: "quantità " + n + " da confermare: non contata" });
+        precedente = null;
+        return;
+      }
       if (contabili.length === 1) {
         var cat = contabili[0];
         q[cat] += n;
@@ -1971,7 +2008,16 @@ html.bloccato .toast { top: calc(16px + env(safe-area-inset-top, 0px)); bottom: 
     });
   }
 
-  var P = { grigio: grigio, soglia: soglia, misuraLettura: misuraLettura, prepara: prepara, pgm: pgm, riquadroTesto: riquadroTesto, trovaScritta: trovaScritta, estremo: estremo, preparaFoto: preparaFoto };
+  // Gira di 90, 180 o 270 gradi in senso orario un'immagine in grigi (per le foto prese di lato).
+  function ruota(g, w, h, giro) {
+    var out = new Uint8Array(w * h), x, y;
+    if (giro === 180) { for (var i = 0; i < g.length; i++) out[g.length - 1 - i] = g[i]; return { dati: out, w: w, h: h }; }
+    if (giro === 90) { for (y = 0; y < h; y++) for (x = 0; x < w; x++) out[x * h + (h - 1 - y)] = g[y * w + x]; return { dati: out, w: h, h: w }; }
+    if (giro === 270) { for (y = 0; y < h; y++) for (x = 0; x < w; x++) out[(w - 1 - x) * h + y] = g[y * w + x]; return { dati: out, w: h, h: w }; }
+    return { dati: g, w: w, h: h };
+  }
+
+  var P = { ruota: ruota, grigio: grigio, soglia: soglia, misuraLettura: misuraLettura, prepara: prepara, pgm: pgm, riquadroTesto: riquadroTesto, trovaScritta: trovaScritta, estremo: estremo, preparaFoto: preparaFoto };
   if (typeof module !== "undefined" && module.exports) module.exports = P;
   else root.LavagnaPreparazione = P;
 })(typeof self !== "undefined" ? self : this);
@@ -3195,12 +3241,26 @@ window.LAVAGNA_CONFIG = {"url":"https://mwebwmxmtxsgeoktmhkc.supabase.co","chiav
         return P.preparaFoto(im.img.naturalWidth, im.img.naturalHeight, render, { lato: 1400 });
       }).then(function (p) {
         URL.revokeObjectURL(im.url);
-        return Lettore.leggi(p.dati, p.w, p.h);
+        // Foto presa di lato o capovolta: se dritta non si legge quasi nessun prodotto, si prova a girarla.
+        var giri = [0, 90, 270, 180], i = 0, migliore = null, msTot = 0;
+        function prova() {
+          var r = P.ruota(p.dati, p.w, p.h, giri[i]);
+          // al lettore va una copia: i dati passati al lettore non restano usabili qui
+          return Lettore.leggi(r.dati === p.dati ? p.dati.slice() : r.dati, r.w, r.h).then(function (m) {
+            msTot += m.ms || 0;
+            var l = C.leggiComanda(m.testo || "");
+            l.prodottiLetti = l.righe.filter(function (x) { return x.prodotto && x.quantita != null; }).length;
+            if (!migliore || l.prodottiLetti > migliore.prodottiLetti) migliore = l;
+            i++;
+            // dritta con almeno un prodotto (anche una comanda da una pizza sola): basta così
+            if (migliore.prodottiLetti >= 2 || (i === 1 && l.prodottiLetti >= 1) || i >= giri.length) return migliore;
+            return prova();
+          });
+        }
+        return prova().then(function (l) { l.ms = msTot; return l; });
       }, function (e) { URL.revokeObjectURL(im.url); throw e; });
-    }).then(function (m) {
-      var l = C.leggiComanda(m.testo || "");
+    }).then(function (l) {
       l.metodo = "telefono";
-      l.ms = m.ms;
       return l;
     });
   }
