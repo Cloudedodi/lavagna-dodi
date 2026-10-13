@@ -1479,8 +1479,9 @@ html.bloccato .toast { top: calc(16px + env(safe-area-inset-top, 0px)); bottom: 
   // Nota del cliente (in DISH è rientrata e scritta in minuscolo, spesso con il # davanti):
   // "# bianca", "#cotto e funghi \", "salsiccia" sulla riga dopo. Non è mai un prodotto.
   function eNota(grezza) {
-    var m = /^(?:[^A-Za-z0-9#]*|\S{1,2}\s+)#\s*(\S?)/.exec(grezza);
-    if (m && !/\d/.test(m[1])) return true; // "#1 Menu" è un 1 letto male, non una nota
+    // "# 4 stagioni" è una nota; "#1 Menu" (attaccato) è un 1 letto male: decide il minuscolo, qui sotto
+    var m = /^(?:[^A-Za-z0-9#]*|\S{1,2}\s+)#(\s*)(\S?)/.exec(grezza);
+    if (m && (m[1] || !/\d/.test(m[2]))) return true;
     var parole = grezza.match(/[A-Za-zÀ-ÿ]{3,}/g);
     return !!(parole && parole.every(function (w) { return w === w.toLowerCase(); }));
   }
@@ -1495,6 +1496,8 @@ html.bloccato .toast { top: calc(16px + env(safe-area-inset-top, 0px)); bottom: 
     grezza = grezza.replace(/^\s*[{}\[\]()|!]\s*(?=1\/2\s)/, "1 ");
     var t = normalizza(grezza).replace(PREZZO, "").trim();
     if (!t || !/[A-Z0-9]/.test(t)) return null; // righe vuote o di soli trattini
+    // apostrofi e segni attaccati davanti alla quantità ("'1 GAGLIARDA", ".2 DIAVOLA")
+    t = t.replace(/(^|\s)['.,]+(?=\d)/g, "$1");
     var parole = t.split(" ");
     var primo = null, migliore = null, voto = -1;
     for (var k = 0; k <= 3 && k < parole.length; k++) {
@@ -1503,6 +1506,16 @@ html.bloccato .toast { top: calc(16px + env(safe-area-inset-top, 0px)); bottom: 
       var a = analizzaUna(originale, resto);
       if (!a) continue;
       if (k === 0) primo = a;
+      // "SL GORGONZOLA": un segno attaccato davanti a un 1 letto come l: si prova con l'ultimo segno
+      if ((a.tipo !== "prodotto" || a.quantita === null) && parole[k] && parole[k].length === 2 && /[A-Z]/.test(parole[k]) && parole.length > k + 1) {
+        var b = analizzaUna(originale, parole[k].charAt(1) + " " + parole.slice(k + 1).join(" "));
+        if (b && b.tipo === "prodotto" && b.quantita !== null && b.esatto && b.quantita <= 3) {
+          b.incerta = parole[k];
+          var vb = 3 - k * 0.5;
+          if (vb > voto) { voto = vb; migliore = b; }
+        }
+        continue;
+      }
       if (a.tipo !== "prodotto" || a.quantita === null) continue;
       // meglio: prodotto esatto, quantità scritta con una cifra vera, meno segni tolti
       var v = (a.esatto ? 4 : 0) + (/^\d/.test(resto) ? 2 : 0) - k * 0.5;
@@ -1714,14 +1727,27 @@ html.bloccato .toast { top: calc(16px + env(safe-area-inset-top, 0px)); bottom: 
       }
       var n = a.quantita;
       // più di 9 dello stesso prodotto su una riga è raro: spesso è "1" più un segno letto come cifra
+      // Un segno del bordo attaccato alla quantità ("21 BUFALA", "SL GORGONZOLA"): vale l'ultima cifra,
+      // si conta ma la riga resta da controllare. Più di 9 pezzi su una riga non capita quasi mai.
+      var dubbio = a.incerta ? "quantità letta male («" + a.incerta + "»)" : "";
       if (n > 9 && contabili.length) {
-        righe.push({ testo: riga, stato: "da controllare", prodotto: a.prodotto, quantita: n, nota: "quantità " + n + " da confermare: non contata" });
-        precedente = null;
-        return;
+        var ultima = n % 10;
+        if (!ultima || !a.esatto) {
+          righe.push({ testo: riga, stato: "da controllare", prodotto: a.prodotto, quantita: n, nota: "quantità " + n + " da confermare: non contata" });
+          precedente = null;
+          return;
+        }
+        dubbio = "letto «" + n + "»";
+        n = ultima;
       }
       if (contabili.length === 1) {
         var cat = contabili[0];
         q[cat] += n;
+        if (dubbio) {
+          righe.push({ testo: riga, stato: "da controllare", categoria: cat, quantita: n, prodotto: a.prodotto, contata: true, nota: dubbio + ": contato " + n + ", controlla" });
+          precedente = cat;
+          return;
+        }
         righe.push({ testo: riga, stato: "contata", categoria: cat, quantita: n, prodotto: a.prodotto, nota: a.esatto ? "" : "nome letto in modo approssimato" });
         precedente = cat;
         return;
@@ -2008,6 +2034,69 @@ html.bloccato .toast { top: calc(16px + env(safe-area-inset-top, 0px)); bottom: 
     });
   }
 
+  // Toglie lo sporco intorno alla scritta (bordo della carta, venature del banco, bordo del telefono):
+  // misura l'altezza tipica delle lettere e cancella tutto quello che sta fuori dal blocco delle lettere.
+  // b: bianco e nero (0 = inchiostro), modificata sul posto.
+  function pulisciBordi(b, w, h) {
+    var n = w * h, etich = new Int32Array(n), pila = new Int32Array(n), zone = [], i;
+    for (i = 0; i < n; i++) {
+      if (b[i] !== 0 || etich[i]) continue;
+      var z = { x1: w, y1: h, x2: 0, y2: 0, area: 0 }, cima = 0, id = zone.length + 1;
+      pila[cima++] = i; etich[i] = id;
+      while (cima) {
+        var k = pila[--cima], kx = k % w, ky = (k - kx) / w;
+        z.area++;
+        if (kx < z.x1) z.x1 = kx; if (kx > z.x2) z.x2 = kx; if (ky < z.y1) z.y1 = ky; if (ky > z.y2) z.y2 = ky;
+        if (kx > 0 && b[k - 1] === 0 && !etich[k - 1]) { etich[k - 1] = id; pila[cima++] = k - 1; }
+        if (kx < w - 1 && b[k + 1] === 0 && !etich[k + 1]) { etich[k + 1] = id; pila[cima++] = k + 1; }
+        if (ky > 0 && b[k - w] === 0 && !etich[k - w]) { etich[k - w] = id; pila[cima++] = k - w; }
+        if (ky < h - 1 && b[k + w] === 0 && !etich[k + w]) { etich[k + w] = id; pila[cima++] = k + w; }
+      }
+      zone.push(z);
+    }
+    // altezza tipica di una lettera: la mediana delle macchie di misura da lettera
+    var alt = zone.filter(function (z) {
+      var zh = z.y2 - z.y1 + 1, zw = z.x2 - z.x1 + 1;
+      return zh >= h * 0.008 && zh <= h * 0.08 && zw <= zh * 2 && z.area >= zh * 2;
+    }).map(function (z) { return z.y2 - z.y1 + 1; }).sort(function (a, c) { return a - c; });
+    if (alt.length < 15) return null;
+    var lettera = alt[alt.length >> 1];
+    var lettere = zone.filter(function (z) {
+      var zh = z.y2 - z.y1 + 1, zw = z.x2 - z.x1 + 1;
+      // una lettera ha tratti spessi: i graffi e i segni del bordo sono fili sottili
+      return zh >= lettera * 0.45 && zh <= lettera * 1.6 && zw <= lettera * 1.6 && z.area >= zh * Math.max(2, lettera * 0.14);
+    });
+    if (lettere.length < 15) return null;
+    function quantile(v, q) { v.sort(function (a, c) { return a - c; }); return v[Math.min(v.length - 1, Math.max(0, Math.floor(v.length * q)))]; }
+    // bordo sinistro: la colonna delle quantità, cioè il primo gruppo di lettere che iniziano allo stesso punto
+    // (i segni sporchi del bordo sono sparsi e non fanno colonna)
+    var passo = Math.max(2, Math.round(lettera * 0.5)), colonne = {}, piuAlta = 0;
+    lettere.forEach(function (z) { var c = Math.floor(z.x1 / passo); colonne[c] = (colonne[c] || 0) + 1; if (colonne[c] > piuAlta) piuAlta = colonne[c]; });
+    var sinistra = null;
+    Object.keys(colonne).map(Number).sort(function (a, c) { return a - c; }).some(function (c) {
+      var conta = (colonne[c] || 0) + (colonne[c + 1] || 0);
+      if (conta >= Math.max(4, piuAlta * 0.3)) { sinistra = c * passo; return true; }
+      return false;
+    });
+    if (sinistra === null) sinistra = quantile(lettere.map(function (z) { return z.x1; }), 0.02);
+    var x1 = Math.max(0, sinistra - Math.round(lettera * 0.4));
+    var x2 = Math.min(w - 1, quantile(lettere.map(function (z) { return z.x2; }), 0.98) + Math.round(lettera * 0.6));
+    var y1 = Math.max(0, quantile(lettere.map(function (z) { return z.y1; }), 0.01) - lettera);
+    var y2 = Math.min(h - 1, quantile(lettere.map(function (z) { return z.y2; }), 0.99) + lettera);
+    // via le macchie che escono dal blocco o troppo grandi per essere lettere (bordo del telefono)
+    var togli = new Uint8Array(zone.length + 1);
+    zone.forEach(function (z, j) {
+      var zh = z.y2 - z.y1 + 1, zw = z.x2 - z.x1 + 1;
+      var fuori = z.x2 < x1 || z.x1 > x2 || z.y2 < y1 || z.y1 > y2 || z.x1 < x1 - lettera || z.x2 > x2 + lettera;
+      if (fuori || zh > lettera * 4 || zw > lettera * 12) togli[j + 1] = 1;
+    });
+    for (i = 0; i < n; i++) {
+      var y = (i / w) | 0, x = i - y * w;
+      if (x < x1 || x > x2 || y < y1 || y > y2 || (etich[i] && togli[etich[i]])) b[i] = 255;
+    }
+    return { x1: x1, y1: y1, x2: x2, y2: y2, lettera: lettera };
+  }
+
   // Gira di 90, 180 o 270 gradi in senso orario un'immagine in grigi (per le foto prese di lato).
   function ruota(g, w, h, giro) {
     var out = new Uint8Array(w * h), x, y;
@@ -2017,7 +2106,15 @@ html.bloccato .toast { top: calc(16px + env(safe-area-inset-top, 0px)); bottom: 
     return { dati: g, w: w, h: h };
   }
 
-  var P = { ruota: ruota, grigio: grigio, soglia: soglia, misuraLettura: misuraLettura, prepara: prepara, pgm: pgm, riquadroTesto: riquadroTesto, trovaScritta: trovaScritta, estremo: estremo, preparaFoto: preparaFoto };
+  // L'immagine pronta per il lettore, girata come serve e pulita ai bordi (sempre una copia nuova).
+  function perLettura(g, w, h, giro) {
+    var r = ruota(g, w, h, giro || 0);
+    var dati = r.dati === g ? g.slice() : r.dati;
+    pulisciBordi(dati, r.w, r.h);
+    return { dati: dati, w: r.w, h: r.h };
+  }
+
+  var P = { perLettura: perLettura, pulisciBordi: pulisciBordi, ruota: ruota, grigio: grigio, soglia: soglia, misuraLettura: misuraLettura, prepara: prepara, pgm: pgm, riquadroTesto: riquadroTesto, trovaScritta: trovaScritta, estremo: estremo, preparaFoto: preparaFoto };
   if (typeof module !== "undefined" && module.exports) module.exports = P;
   else root.LavagnaPreparazione = P;
 })(typeof self !== "undefined" ? self : this);
@@ -3244,9 +3341,9 @@ window.LAVAGNA_CONFIG = {"url":"https://mwebwmxmtxsgeoktmhkc.supabase.co","chiav
         // Foto presa di lato o capovolta: se dritta non si legge quasi nessun prodotto, si prova a girarla.
         var giri = [0, 90, 270, 180], i = 0, migliore = null, msTot = 0;
         function prova() {
-          var r = P.ruota(p.dati, p.w, p.h, giri[i]);
-          // al lettore va una copia: i dati passati al lettore non restano usabili qui
-          return Lettore.leggi(r.dati === p.dati ? p.dati.slice() : r.dati, r.w, r.h).then(function (m) {
+          // al lettore va una copia girata e pulita: i dati passati al lettore non restano usabili qui
+          var r = P.perLettura(p.dati, p.w, p.h, giri[i]);
+          return Lettore.leggi(r.dati, r.w, r.h).then(function (m) {
             msTot += m.ms || 0;
             var l = C.leggiComanda(m.testo || "");
             l.prodottiLetti = l.righe.filter(function (x) { return x.prodotto && x.quantita != null; }).length;
