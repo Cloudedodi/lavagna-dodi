@@ -1,5 +1,5 @@
-// Lavagna ordini Dodi — versione ab82b7eabf
-const PAGINA = "lavagna-pagina-ab82b7eabf";
+// Lavagna ordini Dodi — versione 14c0c23269
+const PAGINA = "lavagna-pagina-14c0c23269";
 const LETTORE = "lavagna-lettore-v1";
 self.addEventListener("install", (ev) => {
   ev.waitUntil(caches.open(PAGINA).then((c) => c.addAll(["./", "manifest.webmanifest", "icone/icona-192.png", "icone/icona-512.png"])).then(() => self.skipWaiting()));
